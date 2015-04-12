@@ -6,7 +6,7 @@ using Abp.MultiTenancy;
 namespace Abp.Authorization.Roles
 {
     /// <summary>
-    /// Used to perform database operations for roles.
+    /// Used to perform permission database operations for a role.
     /// </summary>
     public interface IRolePermissionStore<TTenant, TRole, TUser>
         where TRole : AbpRole<TTenant, TUser>
@@ -23,7 +23,7 @@ namespace Abp.Authorization.Roles
         /// <summary>
         /// Removes a permission grant setting from a role.
         /// </summary>
-        /// <param name="role">Role </param>
+        /// <param name="role">Role</param>
         /// <param name="permissionGrant">Permission grant setting info</param>
         Task RemovePermissionAsync(TRole role, PermissionGrantInfo permissionGrant);
 

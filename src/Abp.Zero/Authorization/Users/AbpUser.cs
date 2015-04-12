@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Abp.Configuration;
+using Abp.Domain.Entities;
 using Abp.Domain.Entities.Auditing;
+using Abp.Extensions;
 using Abp.MultiTenancy;
 using Microsoft.AspNet.Identity;
 
@@ -13,10 +15,16 @@ namespace Abp.Authorization.Users
     /// Represents a user.
     /// </summary>
     [Table("AbpUsers")]
-    public class AbpUser<TTenant, TUser> : FullAuditedEntity<long, TUser>, IUser<long>, IMayHaveTenant<TTenant, TUser>
+    public class AbpUser<TTenant, TUser> : FullAuditedEntity<long, TUser>, IUser<long>, IMayHaveTenant<TTenant, TUser>, IPassivable
         where TTenant : AbpTenant<TTenant, TUser>
         where TUser : AbpUser<TTenant, TUser>
     {
+        /// <summary>
+        /// UserName of the admin.
+        /// admin can not be deleted and UserName of the admin can not be changed.
+        /// </summary>
+        public const string AdminUserName = "admin";
+        
         /// <summary>
         /// Maximum length of the <see cref="Name"/> property.
         /// </summary>
@@ -38,6 +46,11 @@ namespace Abp.Authorization.Users
         public const int MaxPasswordLength = 128;
 
         /// <summary>
+        /// Maximum length of the <see cref="Password"/> without hashed.
+        /// </summary>
+        public const int MaxPlainPasswordLength = 32;
+
+        /// <summary>
         /// Maximum length of the <see cref="EmailAddress"/> property.
         /// </summary>
         public const int MaxEmailAddressLength = 256;
@@ -45,18 +58,18 @@ namespace Abp.Authorization.Users
         /// <summary>
         /// Maximum length of the <see cref="EmailConfirmationCode"/> property.
         /// </summary>
-        public const int MaxEmailConfirmationCodeLength = 16;
+        public const int MaxEmailConfirmationCodeLength = 128;
 
         /// <summary>
         /// Maximum length of the <see cref="PasswordResetCode"/> property.
         /// </summary>
-        public const int MaxPasswordResetCodeLength = 32;
+        public const int MaxPasswordResetCodeLength = 128;
 
         /// <summary>
         /// Tenant of this user.
         /// </summary>
         [ForeignKey("TenantId")]
-        public TTenant Tenant { get; set; }
+        public virtual TTenant Tenant { get; set; }
 
         /// <summary>
         /// Tenant Id of this user.
@@ -125,6 +138,12 @@ namespace Abp.Authorization.Users
         public virtual DateTime? LastLoginTime { get; set; }
 
         /// <summary>
+        /// Is this user active?
+        /// If as user is not active, he/she can not use the application.
+        /// </summary>
+        public virtual bool IsActive { get; set; }
+
+        /// <summary>
         /// Login definitions for this user.
         /// </summary>
         [ForeignKey("UserId")]
@@ -147,5 +166,25 @@ namespace Abp.Authorization.Users
         /// </summary>
         [ForeignKey("UserId")]
         public virtual ICollection<Setting> Settings { get; set; }
+
+        public AbpUser()
+        {
+            IsActive = true;
+        }
+
+        public virtual void SetNewPasswordResetCode()
+        {
+            PasswordResetCode = Guid.NewGuid().ToString("N").Truncate(MaxPasswordResetCodeLength);
+        }
+
+        public virtual void SetNewEmailConfirmationCode()
+        {
+            EmailConfirmationCode = Guid.NewGuid().ToString("N").Truncate(MaxEmailConfirmationCodeLength);
+        }
+
+        public override string ToString()
+        {
+            return string.Format("[User {0}] {1}", Id, UserName);
+        }
     }
 }

@@ -2,14 +2,18 @@
 using System.Data.Entity;
 using System.Linq;
 using System.Linq.Dynamic;
+using System.Threading.Tasks;
 using Abp.Application.Services;
 using Abp.Application.Services.Dto;
 using Abp.Authorization;
 using Abp.AutoMapper;
+using Abp.Configuration;
 using Abp.Domain.Repositories;
 using Abp.Domain.Uow;
 using Abp.Linq.Extensions;
+using Abp.Runtime.Session;
 using Abp.UI;
+using ModuleZeroSampleProject.Configuration;
 using ModuleZeroSampleProject.Questions.Dto;
 using ModuleZeroSampleProject.Users;
 
@@ -35,6 +39,11 @@ namespace ModuleZeroSampleProject.Questions
 
         public PagedResultOutput<QuestionDto> GetQuestions(GetQuestionsInput input)
         {
+            if (input.MaxResultCount <= 0)
+            {
+                input.MaxResultCount = SettingManager.GetSettingValue<int>(MySettingProvider.QuestionsDefaultPageSize);
+            }
+
             var questionCount = _questionRepository.Count();
             var questions =
                 _questionRepository
@@ -51,10 +60,10 @@ namespace ModuleZeroSampleProject.Questions
                    };
         }
 
-        [AbpAuthorize("CanCreateQuestions")]
-        public void CreateQuestion(CreateQuestionInput input)
+        [AbpAuthorize("CanCreateQuestions")] //An example of permission checking
+        public async Task CreateQuestion(CreateQuestionInput input)
         {
-            _questionRepository.Insert(new Question(input.Title, input.Text));
+            await _questionRepository.InsertAsync(new Question(input.Title, input.Text));
         }
 
         public GetQuestionOutput GetQuestion(GetQuestionInput input)
@@ -101,7 +110,7 @@ namespace ModuleZeroSampleProject.Questions
         public SubmitAnswerOutput SubmitAnswer(SubmitAnswerInput input)
         {
             var question = _questionRepository.Get(input.QuestionId);
-            var currentUser = _userRepository.Get(CurrentSession.UserId.Value);
+            var currentUser = _userRepository.Get(CurrentSession.GetUserId());
 
             question.AnswerCount++;
 

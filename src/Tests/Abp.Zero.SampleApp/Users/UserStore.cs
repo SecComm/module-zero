@@ -1,5 +1,6 @@
 ﻿using Abp.Authorization.Users;
 using Abp.Domain.Repositories;
+using Abp.Domain.Uow;
 using Abp.Runtime.Session;
 using Abp.Zero.SampleApp.MultiTenancy;
 using Abp.Zero.SampleApp.Roles;
@@ -13,13 +14,17 @@ namespace Abp.Zero.SampleApp.Users
             IRepository<UserLogin, long> userLoginRepository,
             IRepository<UserRole, long> userRoleRepository,
             IRepository<Role> roleRepository,
-            IAbpSession session)
+            IRepository<UserPermissionSetting, long> userPermissionSettingRepository,
+            IAbpSession session,
+            IUnitOfWorkManager unitOfWorkManager)
             : base(
                 userRepository,
                 userLoginRepository,
                 userRoleRepository,
                 roleRepository,
-                session)
+                userPermissionSettingRepository,
+                session,
+                unitOfWorkManager)
         {
 
         }

@@ -3,7 +3,10 @@ using System.Linq;
 using System.Threading.Tasks;
 using Abp.Authorization.Users;
 using Abp.Dependency;
+using Abp.Domain.Uow;
 using Abp.MultiTenancy;
+using Abp.Runtime.Session;
+using Abp.Zero.Configuration;
 using Microsoft.AspNet.Identity;
 
 namespace Abp.Authorization.Roles
@@ -14,9 +17,13 @@ namespace Abp.Authorization.Roles
     /// </summary>
     public abstract class AbpRoleManager<TTenant, TRole, TUser> : RoleManager<TRole, int>, ITransientDependency
         where TTenant : AbpTenant<TTenant, TUser>
-        where TRole : AbpRole<TTenant, TUser>
+        where TRole : AbpRole<TTenant, TUser>, new()
         where TUser : AbpUser<TTenant, TUser>
     {
+        public IAbpSession AbpSession { get; set; }
+        
+        public IRoleManagementConfig RoleManagementConfig { get; private set; }
+
         private IRolePermissionStore<TTenant, TRole, TUser> RolePermissionStore
         {
             get
@@ -30,17 +37,26 @@ namespace Abp.Authorization.Roles
             }
         }
 
+        protected AbpRoleStore<TTenant, TRole, TUser> AbpStore { get; private set; }
+
         private readonly IPermissionManager _permissionManager;
+        private readonly IUnitOfWorkManager _unitOfWorkManager;
 
         /// <summary>
         /// Constructor.
         /// </summary>
-        /// <param name="store">Role store</param>
-        /// <param name="permissionManager">Permission manager</param>
-        protected AbpRoleManager(AbpRoleStore<TTenant, TRole, TUser> store, IPermissionManager permissionManager)
+        protected AbpRoleManager(
+            AbpRoleStore<TTenant, TRole, TUser> store, 
+            IPermissionManager permissionManager, 
+            IRoleManagementConfig roleManagementConfig,
+            IUnitOfWorkManager unitOfWorkManager)
             : base(store)
         {
+            RoleManagementConfig = roleManagementConfig;
             _permissionManager = permissionManager;
+            _unitOfWorkManager = unitOfWorkManager;
+            AbpSession = NullAbpSession.Instance;
+            AbpStore = store;
         }
 
         /// <summary>
@@ -51,7 +67,7 @@ namespace Abp.Authorization.Roles
         /// <returns>True, if the role has the permission</returns>
         public virtual async Task<bool> HasPermissionAsync(string roleName, string permissionName)
         {
-            return await HasPermissionAsync(await GetRole(roleName), GetPermission(permissionName));
+            return await HasPermissionAsync(await GetRoleByNameAsync(roleName), _permissionManager.GetPermission(permissionName));
         }
 
         /// <summary>
@@ -62,7 +78,7 @@ namespace Abp.Authorization.Roles
         /// <returns>True, if the role has the permission</returns>
         public virtual async Task<bool> HasPermissionAsync(int roleId, string permissionName)
         {
-            return await HasPermissionAsync(await GetRole(roleId), GetPermission(permissionName));
+            return await HasPermissionAsync(await GetRoleByIdAsync(roleId), _permissionManager.GetPermission(permissionName));
         }
 
         /// <summary>
@@ -85,7 +101,7 @@ namespace Abp.Authorization.Roles
         /// <returns>List of granted permissions</returns>
         public virtual async Task<IReadOnlyList<Permission>> GetGrantedPermissionsAsync(int roleId)
         {
-            return await GetGrantedPermissionsAsync(await GetRole(roleId));
+            return await GetGrantedPermissionsAsync(await GetRoleByIdAsync(roleId));
         }
 
         /// <summary>
@@ -95,12 +111,11 @@ namespace Abp.Authorization.Roles
         /// <returns>List of granted permissions</returns>
         public virtual async Task<IReadOnlyList<Permission>> GetGrantedPermissionsAsync(string roleName)
         {
-            return await GetGrantedPermissionsAsync(await GetRole(roleName));
+            return await GetGrantedPermissionsAsync(await GetRoleByNameAsync(roleName));
         }
 
         /// <summary>
-        /// Gets granted permission names for a role.
-        /// Prohibits all other permissions.
+        /// Gets granted permissions for a role.
         /// </summary>
         /// <param name="role">Role</param>
         /// <returns>List of granted permissions</returns>
@@ -127,7 +142,7 @@ namespace Abp.Authorization.Roles
         /// <param name="permissions">Permissions</param>
         public virtual async Task SetGrantedPermissionsAsync(int roleId, IEnumerable<Permission> permissions)
         {
-            await SetGrantedPermissionsAsync(await GetRole(roleId), permissions);
+            await SetGrantedPermissionsAsync(await GetRoleByIdAsync(roleId), permissions);
         }
 
         /// <summary>
@@ -170,7 +185,7 @@ namespace Abp.Authorization.Roles
             }
             else
             {
-                await RolePermissionStore.AddPermissionAsync(role, new PermissionGrantInfo(permission.Name, true));                
+                await RolePermissionStore.AddPermissionAsync(role, new PermissionGrantInfo(permission.Name, true));
             }
         }
 
@@ -195,7 +210,7 @@ namespace Abp.Authorization.Roles
                 await RolePermissionStore.RemovePermissionAsync(role, new PermissionGrantInfo(permission.Name, true));
             }
         }
-        
+
         /// <summary>
         /// Prohibits all permissions for a role.
         /// </summary>
@@ -220,10 +235,40 @@ namespace Abp.Authorization.Roles
         }
 
         /// <summary>
+        /// Creates a role.
+        /// </summary>
+        /// <param name="role">Role</param>
+        public override async Task<IdentityResult> CreateAsync(TRole role)
+        {
+            var result = await CheckDuplicateRoleNameAsync(role.Id, role.Name, role.DisplayName);
+            if (!result.Succeeded)
+            {
+                return result;
+            }
+
+            if (AbpSession.TenantId.HasValue)
+            {
+                role.TenantId = AbpSession.TenantId.Value;
+            }
+            
+            return await base.CreateAsync(role);
+        }
+
+        public override async Task<IdentityResult> UpdateAsync(TRole role)
+        {
+            var result = await CheckDuplicateRoleNameAsync(role.Id, role.Name, role.DisplayName);
+            if (!result.Succeeded)
+            {
+                return result;
+            }
+
+            return await base.UpdateAsync(role);
+        }
+
+        /// <summary>
         /// Deletes a role.
         /// </summary>
         /// <param name="role">Role</param>
-        /// <returns></returns>
         public override Task<IdentityResult> DeleteAsync(TRole role)
         {
             if (role.IsStatic)
@@ -234,37 +279,86 @@ namespace Abp.Authorization.Roles
             return base.DeleteAsync(role);
         }
 
-        private Permission GetPermission(string permissionName)
-        {
-            var permission = _permissionManager.GetPermissionOrNull(permissionName);
-            if (permission == null)
-            {
-                throw new AbpException("There is no permission with name: " + permissionName);
-            }
-
-            return permission;
-        }
-
-        private async Task<TRole> GetRole(int roleId)
+        /// <summary>
+        /// Gets a role by given id.
+        /// Throws exception if no role with given id.
+        /// </summary>
+        /// <param name="roleId">Role id</param>
+        /// <returns>Role</returns>
+        /// <exception cref="AbpException">Throws exception if no role with given id</exception>
+        public virtual async Task<TRole> GetRoleByIdAsync(int roleId)
         {
             var role = await FindByIdAsync(roleId);
             if (role == null)
             {
-                throw new AbpException("There is no role with id = " + roleId);
+                throw new AbpException("There is no role with id: " + roleId);
             }
 
             return role;
         }
 
-        private async Task<TRole> GetRole(string roleName)
+        /// <summary>
+        /// Gets a role by given name.
+        /// Throws exception if no role with given roleName.
+        /// </summary>
+        /// <param name="roleName">Role name</param>
+        /// <returns>Role</returns>
+        /// <exception cref="AbpException">Throws exception if no role with given roleName</exception>
+        public virtual async Task<TRole> GetRoleByNameAsync(string roleName)
         {
             var role = await FindByNameAsync(roleName);
             if (role == null)
             {
-                throw new AbpException("There is no role with name = " + roleName);
+                throw new AbpException("There is no role with name: " + roleName);
             }
 
             return role;
+        }
+        
+        public virtual async Task<IdentityResult> CreateStaticRoles(int tenantId)
+        {
+            var staticRoleDefinitions = RoleManagementConfig.StaticRoles.Where(sr => sr.Side == MultiTenancySides.Tenant);
+
+            foreach (var staticRoleDefinition in staticRoleDefinitions)
+            {
+                var role = new TRole
+                {
+                    TenantId = tenantId,
+                    Name = staticRoleDefinition.RoleName,
+                    DisplayName = staticRoleDefinition.RoleName,
+                    IsStatic = true
+                };
+
+                var identityResult = await CreateAsync(role);
+                if (!identityResult.Succeeded)
+                {
+                    return identityResult;
+                }
+            }
+
+            return IdentityResult.Success;
+        }
+
+        public virtual async Task<IdentityResult> CheckDuplicateRoleNameAsync(int? expectedRoleId, string name, string displayName)
+        {
+            var role = await FindByNameAsync(name);
+            if (role != null && role.Id != expectedRoleId)
+            {
+                return new IdentityResult("There is already a role with name: " + name);
+            }
+
+            role = await FindByDisplayNameAsync(displayName);
+            if (role != null && role.Id != expectedRoleId)
+            {
+                return new IdentityResult("There is already a role with display name: " + displayName);
+            }
+
+            return IdentityResult.Success;
+        }
+
+        private Task<TRole> FindByDisplayNameAsync(string displayName)
+        {
+            return AbpStore.FindByDisplayNameAsync(displayName);
         }
     }
 }

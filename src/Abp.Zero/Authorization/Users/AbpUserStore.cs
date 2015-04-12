@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using Abp.Authorization.Roles;
 using Abp.Dependency;
 using Abp.Domain.Repositories;
+using Abp.Domain.Uow;
 using Abp.MultiTenancy;
 using Abp.Runtime.Session;
 using Microsoft.AspNet.Identity;
@@ -19,6 +20,7 @@ namespace Abp.Authorization.Users
         IUserLoginStore<TUser, long>,
         IUserRoleStore<TUser, long>,
         IQueryableUserStore<TUser, long>,
+        IUserPermissionStore<TTenant, TUser>,
         ITransientDependency
         where TTenant : AbpTenant<TTenant, TUser>
         where TRole : AbpRole<TTenant, TUser>
@@ -28,7 +30,9 @@ namespace Abp.Authorization.Users
         private readonly IRepository<UserLogin, long> _userLoginRepository;
         private readonly IRepository<UserRole, long> _userRoleRepository;
         private readonly IRepository<TRole> _roleRepository;
+        private readonly IRepository<UserPermissionSetting, long> _userPermissionSettingRepository;
         private readonly IAbpSession _session;
+        private readonly IUnitOfWorkManager _unitOfWorkManager;
 
         /// <summary>
         /// Constructor.
@@ -38,13 +42,17 @@ namespace Abp.Authorization.Users
             IRepository<UserLogin, long> userLoginRepository,
             IRepository<UserRole, long> userRoleRepository,
             IRepository<TRole> roleRepository,
-            IAbpSession session)
+            IRepository<UserPermissionSetting, long> userPermissionSettingRepository,
+            IAbpSession session,
+            IUnitOfWorkManager unitOfWorkManager)
         {
             _userRepository = userRepository;
             _userLoginRepository = userLoginRepository;
             _userRoleRepository = userRoleRepository;
             _roleRepository = roleRepository;
             _session = session;
+            _unitOfWorkManager = unitOfWorkManager;
+            _userPermissionSettingRepository = userPermissionSettingRepository;
         }
 
         public async Task CreateAsync(TUser user)
@@ -70,65 +78,84 @@ namespace Abp.Authorization.Users
         public async Task<TUser> FindByNameAsync(string userName)
         {
             return await _userRepository.FirstOrDefaultAsync(
-                user =>
-                    user.TenantId == _session.TenantId && //TODO: Should filter automatically when ABP implements it
-                    (user.UserName == userName || user.EmailAddress == userName) &&
-                    user.IsEmailConfirmed
+                user => user.UserName == userName
                 );
-        }
-
-        public async Task SetPasswordHashAsync(TUser user, string passwordHash)
-        {
-            user.Password = passwordHash;
-            if (!user.IsTransient())
-            {
-                await _userRepository.UpdateAsync(user);
-            }
-        }
-
-        public async Task<string> GetPasswordHashAsync(TUser user)
-        {
-            return (await _userRepository.GetAsync(user.Id)).Password;
-        }
-
-        public async Task<bool> HasPasswordAsync(TUser user)
-        {
-            return !string.IsNullOrEmpty((await _userRepository.GetAsync(user.Id)).Password);
-        }
-
-        public async Task SetEmailAsync(TUser user, string email)
-        {
-            user.EmailAddress = email;
-            if (!user.IsTransient())
-            {
-                await _userRepository.UpdateAsync(user);
-            }
-        }
-
-        public async Task<string> GetEmailAsync(TUser user)
-        {
-            return (await _userRepository.GetAsync(user.Id)).EmailAddress;
-        }
-
-        public async Task<bool> GetEmailConfirmedAsync(TUser user)
-        {
-            return (await _userRepository.GetAsync(user.Id)).IsEmailConfirmed;
-        }
-
-        public async Task SetEmailConfirmedAsync(TUser user, bool confirmed)
-        {
-            user.IsEmailConfirmed = confirmed;
-            if (!user.IsTransient())
-            {
-                await _userRepository.UpdateAsync(user);
-            }
         }
 
         public async Task<TUser> FindByEmailAsync(string email)
         {
             return await _userRepository.FirstOrDefaultAsync(
-                user => user.EmailAddress == email && user.TenantId == _session.TenantId
+                user => user.EmailAddress == email
                 );
+        }
+
+        /// <summary>
+        /// Tries to find a user with user name or email address.
+        /// </summary>
+        /// <param name="userNameOrEmailAddress">User name or email address</param>
+        /// <returns>User or null</returns>
+        public async Task<TUser> FindByNameOrEmailAsync(string userNameOrEmailAddress)
+        {
+            return await _userRepository.FirstOrDefaultAsync(
+                user => (user.UserName == userNameOrEmailAddress || user.EmailAddress == userNameOrEmailAddress)
+                );
+        }
+
+        /// <summary>
+        /// Tries to find a user with user name or email address.
+        /// </summary>
+        /// <param name="tenantId">Tenant Id</param>
+        /// <param name="userNameOrEmailAddress">User name or email address</param>
+        /// <returns>User or null</returns>
+        [UnitOfWork]
+        public virtual async Task<TUser> FindByNameOrEmailAsync(int? tenantId, string userNameOrEmailAddress)
+        {
+            using (_unitOfWorkManager.Current.DisableFilter(AbpDataFilters.MayHaveTenant))
+            {
+                return await _userRepository.FirstOrDefaultAsync(
+                    user =>
+                        user.TenantId == tenantId &&
+                        (user.UserName == userNameOrEmailAddress || user.EmailAddress == userNameOrEmailAddress)
+                    );
+            }
+        }
+
+        public Task SetPasswordHashAsync(TUser user, string passwordHash)
+        {
+            user.Password = passwordHash;
+            return Task.FromResult(0);
+        }
+
+        public Task<string> GetPasswordHashAsync(TUser user)
+        {
+            return Task.FromResult(user.Password);
+        }
+
+        public Task<bool> HasPasswordAsync(TUser user)
+        {
+            return Task.FromResult(!string.IsNullOrEmpty(user.Password));
+        }
+
+        public Task SetEmailAsync(TUser user, string email)
+        {
+            user.EmailAddress = email;
+            return Task.FromResult(0);
+        }
+
+        public Task<string> GetEmailAsync(TUser user)
+        {
+            return Task.FromResult(user.EmailAddress);
+        }
+
+        public Task<bool> GetEmailConfirmedAsync(TUser user)
+        {
+            return Task.FromResult(user.IsEmailConfirmed);
+        }
+
+        public Task SetEmailConfirmedAsync(TUser user, bool confirmed)
+        {
+            user.IsEmailConfirmed = confirmed;
+            return Task.FromResult(0);
         }
 
         public async Task AddLoginAsync(TUser user, UserLoginInfo login)
@@ -168,22 +195,23 @@ namespace Abp.Authorization.Users
                 return null;
             }
 
-            return await _userRepository.FirstOrDefaultAsync(userLogin.UserId);
+            return await _userRepository.FirstOrDefaultAsync(u => u.Id == userLogin.UserId);
         }
 
         public async Task AddToRoleAsync(TUser user, string roleName)
         {
-            var role = await _roleRepository.SingleAsync(r => r.Name == roleName && r.TenantId == _session.TenantId);
-            await _userRoleRepository.InsertAsync(new UserRole
-                                                  {
-                                                      UserId = user.Id,
-                                                      RoleId = role.Id
-                                                  });
+            var role = await _roleRepository.SingleAsync(r => r.Name == roleName);
+            await _userRoleRepository.InsertAsync(
+                new UserRole
+                {
+                    UserId = user.Id,
+                    RoleId = role.Id
+                });
         }
 
         public async Task RemoveFromRoleAsync(TUser user, string roleName)
         {
-            var role = await _roleRepository.SingleAsync(r => r.Name == roleName && r.TenantId == _session.TenantId);
+            var role = await _roleRepository.SingleAsync(r => r.Name == roleName);
             var userRole = await _userRoleRepository.FirstOrDefaultAsync(ur => ur.UserId == user.Id && ur.RoleId == role.Id);
             if (userRole == null)
             {
@@ -206,13 +234,59 @@ namespace Abp.Authorization.Users
 
         public async Task<bool> IsInRoleAsync(TUser user, string roleName)
         {
-            var role = await _roleRepository.SingleAsync(r => r.Name == roleName && r.TenantId == _session.TenantId);
+            var role = await _roleRepository.SingleAsync(r => r.Name == roleName);
             return await _userRoleRepository.FirstOrDefaultAsync(ur => ur.UserId == user.Id && ur.RoleId == role.Id) != null;
         }
 
         public IQueryable<TUser> Users
         {
             get { return _userRepository.GetAll(); }
+        }
+
+        public async Task AddPermissionAsync(TUser user, PermissionGrantInfo permissionGrant)
+        {
+            if (await HasPermissionAsync(user, permissionGrant))
+            {
+                return;
+            }
+
+            await _userPermissionSettingRepository.InsertAsync(
+                new UserPermissionSetting
+                {
+                    UserId = user.Id,
+                    Name = permissionGrant.Name,
+                    IsGranted = permissionGrant.IsGranted
+                });
+        }
+
+        public async Task RemovePermissionAsync(TUser user, PermissionGrantInfo permissionGrant)
+        {
+            await _userPermissionSettingRepository.DeleteAsync(
+                permissionSetting => permissionSetting.UserId == user.Id &&
+                                     permissionSetting.Name == permissionGrant.Name &&
+                                     permissionSetting.IsGranted == permissionGrant.IsGranted
+                );
+        }
+
+        public async Task<IList<PermissionGrantInfo>> GetPermissionsAsync(TUser user)
+        {
+            return (await _userPermissionSettingRepository.GetAllListAsync(p => p.UserId == user.Id))
+                .Select(p => new PermissionGrantInfo(p.Name, p.IsGranted))
+                .ToList();
+        }
+
+        public async Task<bool> HasPermissionAsync(TUser user, PermissionGrantInfo permissionGrant)
+        {
+            return await _userPermissionSettingRepository.FirstOrDefaultAsync(
+                p => p.UserId == user.Id &&
+                     p.Name == permissionGrant.Name &&
+                     p.IsGranted == permissionGrant.IsGranted
+                ) != null;
+        }
+
+        public async Task RemoveAllPermissionSettingsAsync(TUser user)
+        {
+            await _userPermissionSettingRepository.DeleteAsync(s => s.UserId == user.Id);
         }
 
         public void Dispose()
